@@ -53,14 +53,14 @@ end
 
 # Edge dynamics for NetworkDynamics
 function rd_edge!(e, v_s, v_d, p, t)
-    e .= v_s - v_d
+    e .= v_s .- v_d
     nothing
 end
 
 
 # Vertex Dynamics
 function rd_vertex!(dv, v, edges, p, t)
-    p_b, _, D = p
+    p_b, D = p
     brusselator!(dv, v, p_b, t)
     for e in edges
         dv .+= D .* e
@@ -76,30 +76,57 @@ function brusselator_rd_nd(g)
     return network_dynamics(nd_rd_vertex, nd_rd_edge, g)
 end
 
+# Edge dynamics for NetworkDynamics
+Base.@propagate_inbounds function rd_edge_ib!(e, v_s, v_d, p, t)
+    e .= v_s .- v_d
+    nothing
+end
 
-function benchmark(n)
-    #Random.seed!(2023)
-    g = erdos_renyi(n, 0.3)
+
+# Vertex Dynamics
+Base.@propagate_inbounds function rd_vertex_ib!(dv, v, edges, p, t)
+    p_b, D = p
+    brusselator!(dv, v, p_b, t)
+    for e in edges
+        dv .+= D .* e
+    end
+    nothing
+end
+
+nd_rd_vertex_ib = ODEVertex(; f=rd_vertex_ib!, dim=2)
+nd_rd_edge_ib = StaticEdge(; f=rd_edge_ib!, dim=2, coupling=:antisymmetric)
+
+# Construct an in-place function for the network g
+function brusselator_rd_nd_ib(g)
+    return network_dynamics(nd_rd_vertex_ib, nd_rd_edge_ib, g)
+end
+
+function benchmark(n, seed=2023)
+    rng = Xoshiro(seed)
+    g = watts_strogatz(n, 4, 0.3, rng=rng)
     nd_rd! = brusselator_rd_nd(g)
+    nd_rd_ib! = brusselator_rd_nd_ib(g)
     # define params
-    L_ = float.(laplacian_matrix(g))
-    p_sparse = [[1.0,3.0], L_, [0.5,0.1]]
-    p_dense = [[1.0,3.0], Array(L_), [0.5,0.1]]
-    
+    L_ = float.(laplacian_matrix(g)) # this is a minor optimization
+    p_sparse = ([1.0,3.0], L_, [0.5,0.1])
+    p_dense = ([1.0,3.0], Array(L_), [0.5,0.1])
+    p_nd = (([1.0,3.0], [0.5,0.1]), nothing)
     # init vars 
-    u = rand(n,2)
+    u = rand(rng,n,2)
     du = similar(u)
     u_vec = vec(u)
     du_vec = vec(du)
     # run once to compile
     @time brusselator_rd!(du, u, p_sparse, 0.0)
     @time brusselator_rd!(du, u, p_dense, 0.0)
-    @time nd_rd!(du_vec, u_vec, p_sparse, 0.0)
+    @time nd_rd!(du_vec, u_vec, p_nd, 0.0)
+    @time nd_rd_ib!(du_vec, u_vec, p_nd, 0.0)
     
     # run the benchmarks
     b_sparse = @benchmark brusselator_rd!($du, $u, $p_sparse, 0.0)
     b_dense = @benchmark brusselator_rd!($du, $u, $p_dense, 0.0)
-    b_nd = @benchmark $(nd_rd!)($du_vec, $u_vec, $p_sparse, 0.0)
+    b_nd = @benchmark $(nd_rd!)($du_vec, $u_vec, $p_nd, 0.0)
+    b_nd_ib = @benchmark $(nd_rd_ib!)($du_vec, $u_vec, $p_nd, 0.0)
 
     if n <= 100
         mt_rd! = brusselator_rd_mt(n)
@@ -119,12 +146,12 @@ function benchmark(n)
         b_mt = nothing
     end
 
-    return b_sparse, b_dense, b_mt, b_nd
+    return b_sparse, b_dense, b_nd, b_nd_ib, b_mt
 end
 
 begin
-    ns = [5,10,30,50,100,200, 500, 1000]
-    quantiles = zeros(3,4,length(ns))
+    ns = [5,10,20,30,50,100,200, 500, 1000]
+    quantiles = zeros(3,5,length(ns))
     for j in eachindex(ns)
         println("n = $(ns[j])")
         btimes = benchmark(ns[j])
@@ -136,14 +163,14 @@ begin
     end
 end
 
-quantiles
 
 begin
     labels = [
         "Hand-Crafted (Sparse Matmul)",
         "Hand-Crafted (Dense Matmul)",
-        "ModelingToolkit",
         "NetworkDynamics",
+        "NetworkDynamics (@propagate_inbounds)",
+        "ModelingToolkit",
     ]
     p = plot(
         title="Median time for one ODE function evaluation",
@@ -152,9 +179,9 @@ begin
         yscale= :log10,
         xscale= :log10,
         yticks = 10 .^(1:8),
-        legend=:bottomright
+        legend=:topleft
         )
-    for i in [1,2,4]
+    for i in 1:4
         plot!(p, ns, quantiles[2,i,:], 
         #yerror=(quantiles[1,i,:], quantiles[3,i,:]),
         label = labels[i],
@@ -162,8 +189,8 @@ begin
         markersize = 3
         )
     end
-    plot!(p, ns[1:5], quantiles[2,3,1:5], 
-    label = labels[3],
+    plot!(p, ns[1:5], quantiles[2,5,1:5], 
+    label = labels[5],
     markersize = 3,
     marker = :circle,
     linestyle = :dash
