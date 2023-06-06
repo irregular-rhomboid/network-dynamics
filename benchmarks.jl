@@ -223,6 +223,7 @@ begin
     end
     p
 end
+savefig(p, "boxplot.png")
 
 begin
     p = plot(
